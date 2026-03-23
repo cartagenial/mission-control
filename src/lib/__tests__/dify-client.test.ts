@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { loginToDify, makeDifyHeaders, loginFromEnv, DifyLoginError } from '@/lib/dify-client'
+import { loginToDify, makeDifyHeaders, loginFromEnv, verifyDifyTokens, getCachedTokens, setCachedTokens, DifyLoginError } from '@/lib/dify-client'
 
 function mockFetchResponse(ok: boolean, cookies: string[], status = 200) {
   return vi.spyOn(global, 'fetch').mockResolvedValueOnce({
@@ -77,6 +77,45 @@ describe('makeDifyHeaders', () => {
       'Cookie': 'access_token=tok; csrf_token=crf',
       'X-CSRF-Token': 'crf',
     })
+  })
+})
+
+describe('verifyDifyTokens', () => {
+  beforeEach(() => { vi.restoreAllMocks() })
+
+  it('returns true on 200 response', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce({ ok: true } as any)
+    const result = await verifyDifyTokens('http://localhost', { access: 'a', csrf: 'c' })
+    expect(result).toBe(true)
+  })
+
+  it('returns false on 401 response', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce({ ok: false, status: 401 } as any)
+    const result = await verifyDifyTokens('http://localhost', { access: 'a', csrf: 'c' })
+    expect(result).toBe(false)
+  })
+
+  it('returns false on network error', async () => {
+    vi.spyOn(global, 'fetch').mockRejectedValueOnce(new Error('timeout'))
+    const result = await verifyDifyTokens('http://localhost', { access: 'a', csrf: 'c' })
+    expect(result).toBe(false)
+  })
+
+  it('calls /console/api/apps with auth headers', async () => {
+    const spy = vi.spyOn(global, 'fetch').mockResolvedValueOnce({ ok: true } as any)
+    await verifyDifyTokens('http://dify:80', { access: 'tok', csrf: 'crf' })
+    expect(spy.mock.calls[0][0]).toBe('http://dify:80/console/api/apps?page=1&limit=1')
+    const headers = spy.mock.calls[0][1]?.headers as Record<string, string>
+    expect(headers['Cookie']).toContain('access_token=tok')
+  })
+})
+
+describe('token cache', () => {
+  it('stores and retrieves tokens', () => {
+    setCachedTokens({ access: 'a', csrf: 'c' })
+    expect(getCachedTokens()).toEqual({ access: 'a', csrf: 'c' })
+    setCachedTokens(null)
+    expect(getCachedTokens()).toBeNull()
   })
 })
 

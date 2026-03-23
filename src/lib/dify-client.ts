@@ -68,6 +68,34 @@ export async function loginToDify(
   return { access, csrf }
 }
 
+// ---------------------------------------------------------------------------
+// Token cache — login once, verify with GET, re-login only on 401
+// ---------------------------------------------------------------------------
+let _cachedTokens: DifyTokens | null = null
+
+export function getCachedTokens(): DifyTokens | null { return _cachedTokens }
+export function setCachedTokens(tokens: DifyTokens | null): void { _cachedTokens = tokens }
+
+/**
+ * Verify cached tokens are still valid by making a read-only GET request.
+ * Returns true if the tokens are accepted (200), false otherwise.
+ */
+export async function verifyDifyTokens(
+  url: string,
+  tokens: DifyTokens,
+  timeoutMs = 5_000,
+): Promise<boolean> {
+  try {
+    const res = await fetch(`${url}/console/api/apps?page=1&limit=1`, {
+      headers: makeDifyHeaders(tokens),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 /**
  * Build headers for authenticated Dify console API calls.
  */

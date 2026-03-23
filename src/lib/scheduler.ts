@@ -1,5 +1,5 @@
 import { getDatabase, logAuditEvent } from './db'
-import { loginToDify, makeDifyHeaders } from './dify-client'
+import { loginToDify, makeDifyHeaders, getCachedTokens, setCachedTokens, verifyDifyTokens } from './dify-client'
 import { syncAgentsFromConfig } from './agent-sync'
 import { config, ensureDirExists } from './config'
 import { join, dirname } from 'path'
@@ -560,6 +560,7 @@ async function syncDifyAgentsOnStartup(): Promise<void> {
 
   try {
     const tokens = await loginToDify(difyUrl, email, password)
+    setCachedTokens(tokens)
 
     // Fetch apps
     const appsRes = await fetch(`${difyUrl}/console/api/apps`, {
@@ -660,26 +661,41 @@ async function runDifyHealthcheck(): Promise<{ ok: boolean; message: string }> {
       return { ok: false, message: `Dify unhealthy — ${difyAgents.length} agents offline` }
     }
 
-    // Login contract check — verify the console API auth handshake still works
+    // Login contract check — verify cached tokens with a read-only GET,
+    // only re-login if tokens are expired/invalid (avoids 288 POSTs/day)
     const email = process.env.DIFY_ADMIN_EMAIL
     const password = process.env.DIFY_ADMIN_PASSWORD
     if (email && password) {
-      try {
-        await loginToDify(difyUrl, email, password)
-      } catch {
-        eventBus.broadcast('activity.created', {
-          type: 'alert',
-          entity: 'dify',
-          actor: 'scheduler',
-          description: 'ALERT: Dify API reachable but login contract failed — console auth may have changed',
-        })
-        logAuditEvent({
-          action: 'dify.login_contract_failed',
-          actor: 'scheduler',
-          target_type: 'integration',
-          detail: 'Dify console API login failed — credentials invalid or API contract changed',
-        })
-        return { ok: false, message: 'Dify reachable but login contract failed' }
+      let tokens = getCachedTokens()
+      let contractOk = false
+
+      if (tokens) {
+        // Verify existing tokens with a GET (read-only)
+        contractOk = await verifyDifyTokens(difyUrl, tokens)
+      }
+
+      if (!contractOk) {
+        // No cached tokens or they expired — re-login ONCE
+        try {
+          tokens = await loginToDify(difyUrl, email, password)
+          setCachedTokens(tokens)
+          contractOk = true
+        } catch {
+          setCachedTokens(null)
+          eventBus.broadcast('activity.created', {
+            type: 'alert',
+            entity: 'dify',
+            actor: 'scheduler',
+            description: 'ALERT: Dify API reachable but login contract failed — console auth may have changed',
+          })
+          logAuditEvent({
+            action: 'dify.login_contract_failed',
+            actor: 'scheduler',
+            target_type: 'integration',
+            detail: 'Dify console API login failed — credentials invalid or API contract changed',
+          })
+          return { ok: false, message: 'Dify reachable but login contract failed' }
+        }
       }
     }
 
