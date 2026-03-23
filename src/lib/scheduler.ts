@@ -398,9 +398,18 @@ export function initScheduler() {
     running: false,
   })
 
+  tasks.set('dify_healthcheck', {
+    name: 'Dify Healthcheck',
+    intervalMs: FIVE_MINUTES_MS, // Every 5 minutes
+    lastRun: null,
+    nextRun: now + 30_000, // First check 30s after startup
+    enabled: true,
+    running: false,
+  })
+
   // Start the tick loop
   tickInterval = setInterval(tick, TICK_MS)
-  logger.info('Scheduler initialized - backup at ~3AM, cleanup at ~4AM, heartbeat every 5m, webhook/claude/skill/local-agent/gateway-agent sync every 60s')
+  logger.info('Scheduler initialized - backup at ~3AM, cleanup at ~4AM, heartbeat every 5m, dify healthcheck every 5m, webhook/claude/skill/local-agent/gateway-agent sync every 60s')
 }
 
 /** Calculate ms until next occurrence of a given hour (UTC) */
@@ -433,8 +442,9 @@ async function tick() {
       : id === 'aegis_review' ? 'general.aegis_review'
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
+      : id === 'dify_healthcheck' ? 'general.dify_healthcheck'
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue' || id === 'dify_healthcheck'
     if (!isSettingEnabled(settingKey, defaultEnabled)) continue
 
     task.running = true
@@ -445,6 +455,7 @@ async function tick() {
         : id === 'claude_session_scan' ? await syncClaudeSessions()
         : id === 'skill_sync' ? await syncSkillsFromDisk()
         : id === 'local_agent_sync' ? await syncLocalAgents()
+        : id === 'dify_healthcheck' ? await runDifyHealthcheck()
         : id === 'gateway_agent_sync' ? await syncAgentsFromConfig('scheduled').then(async r => {
             const refreshed = await syncAgentLiveStatuses()
             return { ok: true, message: `Gateway sync: ${r.created} created, ${r.updated} updated, ${r.synced} total | Live status: ${refreshed} refreshed` }
@@ -493,8 +504,9 @@ export function getSchedulerStatus() {
       : id === 'aegis_review' ? 'general.aegis_review'
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
+      : id === 'dify_healthcheck' ? 'general.dify_healthcheck'
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue' || id === 'dify_healthcheck'
     result.push({
       id,
       name: task.name,
@@ -524,6 +536,83 @@ export async function triggerTask(taskId: string): Promise<{ ok: boolean; messag
   if (taskId === 'recurring_task_spawn') return spawnRecurringTasks()
   if (taskId === 'stale_task_requeue') return requeueStaleTasks()
   return { ok: false, message: `Unknown task: ${taskId}` }
+}
+
+/** Run Dify healthcheck — polls Dify API and updates agent statuses + emits alerts */
+async function runDifyHealthcheck(): Promise<{ ok: boolean; message: string }> {
+  const difyUrl = process.env.DIFY_API_URL || 'http://nginx:80'
+
+  try {
+    const res = await fetch(`${difyUrl}/console/api/setup`, {
+      signal: AbortSignal.timeout(5000),
+    })
+    const difyHealthy = res.ok
+
+    // Update Dify agent statuses
+    const db = getDatabase()
+    const difyAgents = db.prepare(
+      "SELECT id, name, status FROM agents WHERE config LIKE '%\"framework\":\"dify\"%'"
+    ).all() as Array<{ id: number; name: string; status: string }>
+
+    const newStatus = difyHealthy ? 'online' : 'offline'
+    let changed = 0
+
+    for (const agent of difyAgents) {
+      if (agent.status !== newStatus) {
+        db.prepare('UPDATE agents SET status = ?, updated_at = unixepoch() WHERE id = ?')
+          .run(newStatus, agent.id)
+        changed++
+
+        eventBus.broadcast('agent.status_changed', {
+          id: `dify:${agent.id}`,
+          name: agent.name,
+          status: newStatus,
+          framework: 'dify',
+        })
+      }
+    }
+
+    // Emit alert if Dify went down
+    if (!difyHealthy) {
+      eventBus.broadcast('activity.created', {
+        type: 'alert',
+        entity: 'dify',
+        actor: 'scheduler',
+        description: `ALERT: Dify API is unreachable — ${difyAgents.length} agents marked offline`,
+      })
+
+      logAuditEvent({
+        action: 'dify.unhealthy',
+        actor: 'scheduler',
+        target_type: 'integration',
+        detail: `Dify API unreachable, ${difyAgents.length} agents set offline`,
+      })
+
+      return { ok: false, message: `Dify unhealthy — ${difyAgents.length} agents offline` }
+    }
+
+    return {
+      ok: true,
+      message: changed > 0
+        ? `Dify healthy — ${changed} agents status updated`
+        : `Dify healthy — ${difyAgents.length} agents online`,
+    }
+  } catch (err: any) {
+    // Dify completely unreachable
+    const db = getDatabase()
+    db.prepare(
+      "UPDATE agents SET status = 'offline', updated_at = unixepoch() WHERE config LIKE '%\"framework\":\"dify\"%' AND status != 'offline'"
+    ).run()
+
+    eventBus.broadcast('activity.created', {
+      type: 'alert',
+      entity: 'dify',
+      actor: 'scheduler',
+      description: `CRITICAL: Dify API unreachable — all Dify agents marked offline (${err.message})`,
+    })
+
+    return { ok: false, message: `Dify unreachable: ${err.message}` }
+  }
 }
 
 /** Stop the scheduler */
