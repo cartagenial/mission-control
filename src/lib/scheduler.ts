@@ -1,4 +1,5 @@
 import { getDatabase, logAuditEvent } from './db'
+import { loginToDify, makeDifyHeaders } from './dify-client'
 import { syncAgentsFromConfig } from './agent-sync'
 import { config, ensureDirExists } from './config'
 import { join, dirname } from 'path'
@@ -558,33 +559,11 @@ async function syncDifyAgentsOnStartup(): Promise<void> {
   }
 
   try {
-    // Login
-    const b64Pass = Buffer.from(password).toString('base64')
-    const loginRes = await fetch(`${difyUrl}/console/api/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password: b64Pass }),
-      signal: AbortSignal.timeout(10000),
-    })
-    if (!loginRes.ok) {
-      logger.warn('Dify auto-sync: login failed')
-      return
-    }
-
-    const cookies = loginRes.headers.getSetCookie?.() || []
-    let access = '', csrf = ''
-    for (const c of cookies) {
-      if (c.startsWith('access_token=')) access = c.split('access_token=')[1].split(';')[0]
-      if (c.startsWith('csrf_token=')) csrf = c.split('csrf_token=')[1].split(';')[0]
-    }
-    if (!access || !csrf) return
+    const tokens = await loginToDify(difyUrl, email, password)
 
     // Fetch apps
     const appsRes = await fetch(`${difyUrl}/console/api/apps`, {
-      headers: {
-        'Cookie': `access_token=${access}; csrf_token=${csrf}`,
-        'X-CSRF-Token': csrf,
-      },
+      headers: makeDifyHeaders(tokens),
       signal: AbortSignal.timeout(10000),
     })
     if (!appsRes.ok) return

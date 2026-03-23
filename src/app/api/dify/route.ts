@@ -3,6 +3,7 @@ import { getDatabase } from '@/lib/db'
 import { eventBus } from '@/lib/event-bus'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
+import { loginFromEnv, makeDifyHeaders } from '@/lib/dify-client'
 
 const DIFY_API_URL = process.env.DIFY_API_URL || 'http://nginx:80'
 const DIFY_ORCHESTRATOR_KEY = process.env.DIFY_ORCHESTRATOR_API_KEY || ''
@@ -85,18 +86,15 @@ export async function POST(request: NextRequest) {
  */
 async function syncDifyApps(workspaceId: number) {
   // Login to Dify console to get apps list
-  const consoleToken = await getDifyConsoleToken()
-  if (!consoleToken) {
+  const tokens = await loginFromEnv()
+  if (!tokens) {
     return NextResponse.json({
       error: 'Cannot authenticate with Dify console. Check DIFY_ADMIN_EMAIL and DIFY_ADMIN_PASSWORD env vars.',
     }, { status: 502 })
   }
 
   const appsRes = await fetch(`${DIFY_API_URL}/console/api/apps`, {
-    headers: {
-      'Cookie': `access_token=${consoleToken.access}; csrf_token=${consoleToken.csrf}`,
-      'X-CSRF-Token': consoleToken.csrf,
-    },
+    headers: makeDifyHeaders(tokens),
   })
 
   if (!appsRes.ok) {
@@ -254,43 +252,6 @@ async function runOrchestrator(query: string, user: string) {
   })
 }
 
-/**
- * Login to Dify console and return access + CSRF tokens.
- */
-async function getDifyConsoleToken(): Promise<{ access: string; csrf: string } | null> {
-  const email = process.env.DIFY_ADMIN_EMAIL
-  const password = process.env.DIFY_ADMIN_PASSWORD
-
-  if (!email || !password) return null
-
-  try {
-    const b64Password = Buffer.from(password).toString('base64')
-    const res = await fetch(`${DIFY_API_URL}/console/api/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password: b64Password }),
-    })
-
-    if (!res.ok) return null
-
-    const cookies = res.headers.getSetCookie?.() || []
-    let access = ''
-    let csrf = ''
-
-    for (const cookie of cookies) {
-      if (cookie.startsWith('access_token=')) {
-        access = cookie.split('access_token=')[1].split(';')[0]
-      }
-      if (cookie.startsWith('csrf_token=')) {
-        csrf = cookie.split('csrf_token=')[1].split(';')[0]
-      }
-    }
-
-    return access && csrf ? { access, csrf } : null
-  } catch {
-    return null
-  }
-}
 
 /**
  * Infer agent role from app name/description.
