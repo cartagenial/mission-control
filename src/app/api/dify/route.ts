@@ -6,6 +6,7 @@ import { logger } from '@/lib/logger'
 
 const DIFY_API_URL = process.env.DIFY_API_URL || 'http://nginx:80'
 const DIFY_ORCHESTRATOR_KEY = process.env.DIFY_ORCHESTRATOR_API_KEY || ''
+const DAILY_BUDGET_USD = parseFloat(process.env.DIFY_DAILY_BUDGET_USD || '5.00')
 
 interface DifyApp {
   id: string
@@ -163,6 +164,17 @@ async function runOrchestrator(query: string, user: string) {
     return NextResponse.json({ error: 'query is required' }, { status: 400 })
   }
 
+  // Check daily spending limit
+  const budgetCheck = await checkDailyBudget()
+  if (!budgetCheck.ok) {
+    logger.warn({ spent: budgetCheck.spent, limit: DAILY_BUDGET_USD }, 'Daily budget exceeded — blocking workflow run')
+    return NextResponse.json({
+      error: `Daily budget exceeded: $${budgetCheck.spent.toFixed(4)} / $${DAILY_BUDGET_USD.toFixed(2)}. Adjust DIFY_DAILY_BUDGET_USD to increase.`,
+      spent: budgetCheck.spent,
+      limit: DAILY_BUDGET_USD,
+    }, { status: 429 })
+  }
+
   // Call Dify orchestrator workflow
   const runRes = await fetch(`${DIFY_API_URL}/v1/workflows/run`, {
     method: 'POST',
@@ -290,4 +302,31 @@ function inferRole(name: string, description: string): string {
   if (combined.includes('develop') || combined.includes('dev')) return 'developer'
   if (combined.includes('operation') || combined.includes('ops')) return 'operator'
   return 'assistant'
+}
+
+/**
+ * Check if daily spending is within budget.
+ * Reads token usage from the MC JSON file and sums today's costs.
+ */
+async function checkDailyBudget(): Promise<{ ok: boolean; spent: number }> {
+  try {
+    const { readFile } = await import('fs/promises')
+    const { config: appCfg } = await import('@/lib/config')
+
+    const raw = await readFile(appCfg.tokensPath, 'utf-8')
+    const records = JSON.parse(raw) as Array<{ timestamp: number; cost: number; sessionId?: string }>
+
+    const todayStart = new Date()
+    todayStart.setHours(0, 0, 0, 0)
+    const todayMs = todayStart.getTime()
+
+    const todaySpent = records
+      .filter(r => r.timestamp >= todayMs && r.sessionId?.startsWith('dify:'))
+      .reduce((sum, r) => sum + (r.cost || 0), 0)
+
+    return { ok: todaySpent < DAILY_BUDGET_USD, spent: todaySpent }
+  } catch {
+    // No token file yet = no spending = OK
+    return { ok: true, spent: 0 }
+  }
 }

@@ -284,6 +284,13 @@ export function initScheduler() {
     logger.warn({ err }, 'Agent auto-sync failed')
   })
 
+  // Auto-sync Dify apps as MC agents on startup (delayed 10s to let Dify boot)
+  setTimeout(() => {
+    syncDifyAgentsOnStartup().catch(err => {
+      logger.warn({ err }, 'Dify agent auto-sync failed on startup')
+    })
+  }, 10_000)
+
   // Register tasks
   const now = Date.now()
   // Stagger the initial runs: backup at ~3 AM, cleanup at ~4 AM (relative to process start)
@@ -539,6 +546,89 @@ export async function triggerTask(taskId: string): Promise<{ ok: boolean; messag
 }
 
 /** Run Dify healthcheck — polls Dify API and updates agent statuses + emits alerts */
+/** Sync Dify apps as MC agents on startup */
+async function syncDifyAgentsOnStartup(): Promise<void> {
+  const difyUrl = process.env.DIFY_API_URL || 'http://nginx:80'
+  const email = process.env.DIFY_ADMIN_EMAIL
+  const password = process.env.DIFY_ADMIN_PASSWORD
+
+  if (!email || !password) {
+    logger.info('Dify auto-sync skipped — DIFY_ADMIN_EMAIL/PASSWORD not set')
+    return
+  }
+
+  try {
+    // Login
+    const b64Pass = Buffer.from(password).toString('base64')
+    const loginRes = await fetch(`${difyUrl}/console/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password: b64Pass }),
+      signal: AbortSignal.timeout(10000),
+    })
+    if (!loginRes.ok) {
+      logger.warn('Dify auto-sync: login failed')
+      return
+    }
+
+    const cookies = loginRes.headers.getSetCookie?.() || []
+    let access = '', csrf = ''
+    for (const c of cookies) {
+      if (c.startsWith('access_token=')) access = c.split('access_token=')[1].split(';')[0]
+      if (c.startsWith('csrf_token=')) csrf = c.split('csrf_token=')[1].split(';')[0]
+    }
+    if (!access || !csrf) return
+
+    // Fetch apps
+    const appsRes = await fetch(`${difyUrl}/console/api/apps`, {
+      headers: {
+        'Cookie': `access_token=${access}; csrf_token=${csrf}`,
+        'X-CSRF-Token': csrf,
+      },
+      signal: AbortSignal.timeout(10000),
+    })
+    if (!appsRes.ok) return
+
+    const appsData = await appsRes.json() as { data: Array<{ id: string; name: string; mode: string; description: string; icon: string }> }
+    const apps = appsData.data || []
+
+    const db = getDatabase()
+    const upsert = db.prepare(`
+      INSERT INTO agents (name, role, status, session_key, config)
+      VALUES (?, ?, 'online', ?, ?)
+      ON CONFLICT(name) DO UPDATE SET
+        status = 'online',
+        config = excluded.config,
+        updated_at = unixepoch()
+    `)
+
+    let synced = 0
+    for (const app of apps) {
+      const combined = `${app.name} ${app.description || ''}`.toLowerCase()
+      const role = combined.includes('orchestrat') ? 'orchestrator'
+        : combined.includes('research') ? 'researcher'
+        : combined.includes('develop') ? 'developer'
+        : combined.includes('operation') ? 'operator'
+        : 'assistant'
+
+      const config = JSON.stringify({
+        framework: 'dify',
+        dify_app_id: app.id,
+        dify_mode: app.mode,
+        description: app.description || '',
+        icon: app.icon || '',
+      })
+
+      upsert.run(app.name, role, `dify:${app.id}`, config)
+      synced++
+    }
+
+    logger.info({ synced, apps: apps.map(a => a.name) }, 'Dify agents auto-synced on startup')
+  } catch (err) {
+    logger.warn({ err }, 'Dify auto-sync failed')
+  }
+}
+
 async function runDifyHealthcheck(): Promise<{ ok: boolean; message: string }> {
   const difyUrl = process.env.DIFY_API_URL || 'http://nginx:80'
 
