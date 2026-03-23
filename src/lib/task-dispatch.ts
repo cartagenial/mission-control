@@ -426,7 +426,7 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
         const invokeParams = {
           message: prompt,
           agentId: reviewAgent,
-          idempotencyKey: `aegis-review-${task.id}-${Date.now()}`,
+          idempotencyKey: `aegis-review-${task.id}`,
           deliver: false,
         }
         const finalResult = await runOpenClaw(
@@ -709,7 +709,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
           {
             sessionKey: targetSession,
             message: prompt,
-            idempotencyKey: `task-dispatch-${task.id}-${Date.now()}`,
+            idempotencyKey: `task-dispatch-${task.id}`,
             deliver: false,
           },
           125_000,
@@ -730,7 +730,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         const invokeParams: Record<string, unknown> = {
           message: prompt,
           agentId: gatewayAgentId,
-          idempotencyKey: `task-dispatch-${task.id}-${Date.now()}`,
+          idempotencyKey: `task-dispatch-${task.id}`,
           deliver: false,
         }
         // Route to appropriate model tier based on task complexity.

@@ -316,9 +316,9 @@ async function checkDailyBudget(): Promise<{ ok: boolean; spent: number }> {
     const raw = await readFile(appCfg.tokensPath, 'utf-8')
     const records = JSON.parse(raw) as Array<{ timestamp: number; cost: number; sessionId?: string }>
 
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
-    const todayMs = todayStart.getTime()
+    const now = new Date()
+    const todayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+    const todayMs = todayStart
 
     const todaySpent = records
       .filter(r => r.timestamp >= todayMs && r.sessionId?.startsWith('dify:'))
