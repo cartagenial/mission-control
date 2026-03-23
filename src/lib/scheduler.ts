@@ -660,6 +660,29 @@ async function runDifyHealthcheck(): Promise<{ ok: boolean; message: string }> {
       return { ok: false, message: `Dify unhealthy — ${difyAgents.length} agents offline` }
     }
 
+    // Login contract check — verify the console API auth handshake still works
+    const email = process.env.DIFY_ADMIN_EMAIL
+    const password = process.env.DIFY_ADMIN_PASSWORD
+    if (email && password) {
+      try {
+        await loginToDify(difyUrl, email, password)
+      } catch {
+        eventBus.broadcast('activity.created', {
+          type: 'alert',
+          entity: 'dify',
+          actor: 'scheduler',
+          description: 'ALERT: Dify API reachable but login contract failed — console auth may have changed',
+        })
+        logAuditEvent({
+          action: 'dify.login_contract_failed',
+          actor: 'scheduler',
+          target_type: 'integration',
+          detail: 'Dify console API login failed — credentials invalid or API contract changed',
+        })
+        return { ok: false, message: 'Dify reachable but login contract failed' }
+      }
+    }
+
     return {
       ok: true,
       message: changed > 0

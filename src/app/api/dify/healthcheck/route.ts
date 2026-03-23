@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase } from '@/lib/db'
 import { eventBus } from '@/lib/event-bus'
 import { logger } from '@/lib/logger'
+import { loginFromEnv } from '@/lib/dify-client'
 
 const DIFY_API_URL = process.env.DIFY_API_URL || 'http://nginx:80'
 
@@ -56,6 +57,14 @@ export async function GET(request: NextRequest) {
   } catch (err) {
     logger.error({ err }, 'Failed to update Dify agent statuses')
     results.agents_updated = 'error'
+  }
+
+  // Login contract check — verify console API auth handshake
+  if (difyHealthy && process.env.DIFY_ADMIN_EMAIL && process.env.DIFY_ADMIN_PASSWORD) {
+    const tokens = await loginFromEnv()
+    results.login_contract = tokens ? 'healthy' : 'failed'
+  } else if (!process.env.DIFY_ADMIN_EMAIL || !process.env.DIFY_ADMIN_PASSWORD) {
+    results.login_contract = 'skipped'
   }
 
   // Check individual workflow apps if we have API keys
